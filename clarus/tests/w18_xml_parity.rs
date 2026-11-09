@@ -47,6 +47,8 @@ fn full_workitem() -> WorkItem {
         input_readiness: Some("READY".to_string()),
         sps_start_datetime: Some("20261023T090000".to_string()),
         input_study_uid: Some("1.2.826.0.1.3680043.10.9999.1".to_string()),
+        input_information: None,
+        performed_procedure_information: None,
         reason_for_cancellation: None,
         cancellation_datetime: None,
         // The requested workitem code: AIW-I 4.84.4.1.2.1 has the performer

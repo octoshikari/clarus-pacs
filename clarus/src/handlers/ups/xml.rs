@@ -210,7 +210,15 @@ fn write_workitem_attrs(out: &mut String, wi: &WorkItem) {
         write_workitem_code_sequence(out, "00404018", "ScheduledWorkitemCodeSequence", code);
     }
     // (0040,4021) InputInformationSequence - SQ, one item naming the study.
-    if let Some(v) = wi.input_study_uid.as_deref() {
+    if let Some(stored) = wi.input_information.as_deref() {
+        if let Ok(element) = crate::handlers::instance_xml::json_info_to_xml_element(
+            "00404021",
+            "InputInformationSequence",
+            stored.as_bytes(),
+        ) {
+            out.push_str(&element);
+        }
+    } else if let Some(v) = wi.input_study_uid.as_deref() {
         write_input_information(out, v);
     }
     // (0040,4041) InputReadinessState - CS.
@@ -239,7 +247,7 @@ fn write_workitem_attrs(out: &mut String, wi: &WorkItem) {
     }
     // (0074,1204) ProcedureStepLabel - SH.
     if let Some(v) = wi.step_label.as_deref() {
-        write_scalar(out, "00741204", "SH", v);
+        write_scalar(out, "00741204", "LO", v);
     }
     // (0074,1210) ScheduledProcessingParametersSequence - SQ. The element is
     // stored as an opaque JSON info object (the server does not interpret the
@@ -269,7 +277,17 @@ fn write_workitem_attrs(out: &mut String, wi: &WorkItem) {
     // C.30.3-1): the start/end datetimes, the performed station and workitem
     // codes and the outputs are all CHILDREN of this item, so a conformant
     // reader looks for them here and nowhere else.
-    write_performed_procedure(out, wi);
+    if let Some(stored) = wi.performed_procedure_information.as_deref() {
+        if let Ok(element) = crate::handlers::instance_xml::json_info_to_xml_element(
+            "00741216",
+            "UnifiedProcedureStepPerformedProcedureSequence",
+            stored.as_bytes(),
+        ) {
+            out.push_str(&element);
+        }
+    } else {
+        write_performed_procedure(out, wi);
+    }
     // (0074,1238) ReasonForCancellation - LT.
     if let Some(v) = wi.reason_for_cancellation.as_deref() {
         write_scalar(out, "00741238", "LT", v);
@@ -548,6 +566,8 @@ mod tests {
             input_readiness: Some("READY".to_string()),
             sps_start_datetime: Some("20261011090000".to_string()),
             input_study_uid: None,
+            input_information: None,
+            performed_procedure_information: None,
             reason_for_cancellation: None,
             cancellation_datetime: None,
             patient_id_issuer: None,

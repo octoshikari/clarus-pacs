@@ -63,6 +63,8 @@ fn full_workitem() -> clarus_ports::models::WorkItem {
         input_readiness: Some("READY".to_string()),
         sps_start_datetime: Some("20230515T103000".to_string()),
         input_study_uid: Some("1.2.826.0.1.3680043.10.9999.1".to_string()),
+        input_information: None,
+        performed_procedure_information: None,
         reason_for_cancellation: None,
         cancellation_datetime: None,
         patient_id_issuer: Some("SITE-A".to_string()),
