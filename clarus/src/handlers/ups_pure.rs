@@ -223,6 +223,8 @@ fn workitem_to_record(wi: &WorkItem) -> clarus_core::ups::WorkItemRecord {
         input_readiness: wi.input_readiness.clone(),
         sps_start_datetime: wi.sps_start_datetime.clone(),
         input_study_uid: wi.input_study_uid.clone(),
+        input_information: wi.input_information.clone(),
+        performed_procedure_information: wi.performed_procedure_information.clone(),
         reason_for_cancellation: wi.reason_for_cancellation.clone(),
         cancellation_datetime: wi.cancellation_datetime.clone(),
         patient_id_issuer: wi.patient_id_issuer.clone(),
@@ -291,6 +293,8 @@ fn record_to_workitem(rec: &clarus_core::ups::WorkItemRecord) -> WorkItem {
         input_readiness: rec.input_readiness.clone(),
         sps_start_datetime: rec.sps_start_datetime.clone(),
         input_study_uid: rec.input_study_uid.clone(),
+        input_information: rec.input_information.clone(),
+        performed_procedure_information: rec.performed_procedure_information.clone(),
         reason_for_cancellation: rec.reason_for_cancellation.clone(),
         cancellation_datetime: rec.cancellation_datetime.clone(),
         patient_id_issuer: rec.patient_id_issuer.clone(),
@@ -500,6 +504,8 @@ pub fn ups_create(
         input_readiness: Some(input_readiness),
         sps_start_datetime: Some(sps_start_datetime),
         input_study_uid,
+        input_information: extract_opaque_sequence(body_obj, "00404021")?,
+        performed_procedure_information: None,
         reason_for_cancellation: None,
         cancellation_datetime: None,
         // (0010,0021) and (0040,4018): stored as received, exactly like
@@ -1191,6 +1197,9 @@ pub fn ups_update_attributes(
     // earlier Update. Each child is therefore read independently below, exactly
     // as 11.6.1.4 replaces the elements a request carries.
     if let Some(item) = performed_item(body_obj)? {
+        let previous = performed_sequence_for_update(&updated)?;
+        updated.performed_procedure_information =
+            merge_performed_sequence(previous.as_deref(), body_obj)?;
         // (0040,4033) Output Information Sequence. Present -> REPLACED whole.
         // A present-but-empty sequence is refused: a COMPLETED workitem with an
         // empty output list would claim it produced nothing while reporting
@@ -1426,41 +1435,30 @@ fn extract_output_information(
 
     let mut outputs = Vec::with_capacity(items.len());
     for item in items {
-        let instance = item
-            .obj_get("00081155")
-            .and_then(|v| v.obj_get("Value"))
-            .and_then(|v| v.first_of_array())
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        if instance.is_empty() {
-            return Err(bad_request(
-                "(0040,4033) item has no (0008,1155) Referenced SOP Instance UID",
-            ));
+        let series = extract_tag(item, "0020000E").unwrap_or_default();
+        let references = if let Some(sequence) = item.obj_get("00081199") {
+            sequence
+                .obj_get("Value")
+                .and_then(|value| value.as_array())
+                .ok_or_else(|| bad_request("Referenced SOP Sequence must carry a Value array"))?
+                .iter()
+                .collect::<Vec<_>>()
+        } else {
+            vec![item]
+        };
+        for reference in references {
+            let instance = extract_tag(reference, "00081155").unwrap_or_default();
+            if instance.is_empty() {
+                return Err(bad_request(
+                    "Output reference has no Referenced SOP Instance UID",
+                ));
+            }
+            outputs.push(OutputReference {
+                sop_class_uid: extract_tag(reference, "00081150").unwrap_or_default(),
+                series_instance_uid: series.clone(),
+                sop_instance_uid: instance,
+            });
         }
-        let class = item
-            .obj_get("00081150")
-            .and_then(|v| v.obj_get("Value"))
-            .and_then(|v| v.first_of_array())
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        // (0020,000E) Series Instance UID is 1C in the Referenced Instances and
-        // Access Macro (PS3.3 Table 10-3b), so a performer may name it and a
-        // consumer needs it to build a retrieve URL. Absent or empty leaves it
-        // empty rather than refusing the item.
-        let series = item
-            .obj_get("0020000E")
-            .and_then(|v| v.obj_get("Value"))
-            .and_then(|v| v.first_of_array())
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        outputs.push(OutputReference {
-            sop_class_uid: class,
-            series_instance_uid: series,
-            sop_instance_uid: instance,
-        });
     }
     Ok(outputs)
 }
@@ -1710,6 +1708,71 @@ fn extract_scheduled_workitem_code_checked(
         });
     }
     Ok(Some(code))
+}
+
+fn extract_opaque_sequence(
+    body: &crate::handlers::json_common::JsonVal,
+    tag: &str,
+) -> Result<Option<String>, UpsErr> {
+    use crate::handlers::json_common::{JsonVal, write_json_val};
+    let Some(entry) = body.obj_get(tag) else {
+        return Ok(None);
+    };
+    if entry.obj_get("vr").and_then(JsonVal::as_str) != Some("SQ") {
+        return Err(bad_request("DICOM sequence must have VR SQ"));
+    }
+    let value = entry
+        .obj_get("Value")
+        .filter(|value| matches!(value, JsonVal::Arr(_)))
+        .ok_or_else(|| bad_request("DICOM sequence must carry a Value array"))?;
+    let mut out = Vec::new();
+    out.extend_from_slice(br#"{"Value":"#);
+    write_json_val(&mut out, value);
+    out.extend_from_slice(br#","vr":"SQ"}"#);
+    Ok(Some(
+        String::from_utf8(out).expect("JSON writer emits UTF-8"),
+    ))
+}
+
+// Older records have only the typed fields. Materialize their existing report
+// before the first partial update so adopting the lossless form cannot erase it.
+fn performed_sequence_for_update(workitem: &WorkItem) -> Result<Option<String>, UpsErr> {
+    if let Some(stored) = &workitem.performed_procedure_information {
+        return Ok(Some(stored.clone()));
+    }
+    let mut wire = Vec::new();
+    write_workitem_json(&mut wire, workitem);
+    let body = parse_json(&wire).ok_or_else(|| internal_err("Invalid stored workitem"))?;
+    extract_opaque_sequence(&body, "00741216")
+}
+
+fn merge_performed_sequence(
+    previous: Option<&str>,
+    body: &crate::handlers::json_common::JsonVal,
+) -> Result<Option<String>, UpsErr> {
+    use crate::handlers::json_common::{JsonVal, parse_json, write_json_val};
+    let Some(incoming) = extract_opaque_sequence(body, "00741216")? else {
+        return Ok(None);
+    };
+    let mut merged = parse_json(incoming.as_bytes()).expect("serialized sequence");
+    if let Some(previous) = previous.and_then(|text| parse_json(text.as_bytes()))
+        && let Some(JsonVal::Obj(old_fields)) =
+            previous.obj_get("Value").and_then(JsonVal::first_of_array)
+        && let JsonVal::Obj(root) = &mut merged
+        && let Some((_, JsonVal::Arr(items))) = root.iter_mut().find(|(tag, _)| tag == "Value")
+        && let Some(JsonVal::Obj(fields)) = items.first_mut()
+    {
+        for (tag, value) in old_fields {
+            if !fields.iter().any(|(key, _)| key == tag) {
+                fields.push((tag.clone(), value.clone()));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    write_json_val(&mut out, &merged);
+    Ok(Some(
+        String::from_utf8(out).expect("JSON writer emits UTF-8"),
+    ))
 }
 
 /// Read (0074,1210) Scheduled Processing Parameters Sequence into its stored
@@ -2134,6 +2197,68 @@ fn render_workitem_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_update_preserves_a_legacy_typed_performer_report() {
+        let legacy = clarus_core::ups::WorkItemRecord {
+            workitem_uid: "1.2.3".into(),
+            workflow_state: "IN PROGRESS".into(),
+            performed_start_datetime: Some("20261109110000+0000".into()),
+            output_information: Some(vec![clarus_core::ups::OutputReference {
+                sop_class_uid: "1.2.3.4".into(),
+                series_instance_uid: "1.2.3.1".into(),
+                sop_instance_uid: "1.2.3.1.1".into(),
+            }]),
+            ..Default::default()
+        };
+        let previous = performed_sequence_for_update(&record_to_workitem(&legacy))
+            .unwrap_or_else(|error| panic!("legacy report rejected: {}", error.status))
+            .unwrap();
+        let later = parse_json(br#"{"00741216":{"vr":"SQ","Value":[{"00404051":{"vr":"DT","Value":["20261109120000+0000"]}}]}}"#).unwrap();
+        let merged = merge_performed_sequence(Some(&previous), &later)
+            .unwrap_or_else(|error| panic!("partial report rejected: {}", error.status))
+            .unwrap();
+        let parsed = parse_json(merged.as_bytes()).unwrap();
+        let item = parsed.obj_get("Value").unwrap().first_of_array().unwrap();
+        assert_eq!(
+            extract_tag(item, "00404050").as_deref(),
+            Some("20261109110000+0000")
+        );
+        assert!(item.obj_get("00404051").is_some());
+        let outputs = extract_output_information(item.obj_get("00404033").unwrap())
+            .unwrap_or_else(|error| panic!("legacy outputs rejected: {}", error.status));
+        assert_eq!(outputs[0].sop_instance_uid, "1.2.3.1.1");
+    }
+
+    #[test]
+    fn preserves_nested_reference_macros_and_partial_performed_updates() {
+        use crate::handlers::json_common::parse_json;
+        let source = parse_json(br#"{"00404021":{"vr":"SQ","Value":[{"0040E020":{"vr":"CS","Value":["DICOM"]},"0020000D":{"vr":"UI","Value":["1.2.3"]},"0020000E":{"vr":"UI","Value":["1.2.3.1"]},"00081199":{"vr":"SQ","Value":[{"00081150":{"vr":"UI","Value":["1.2.3.4"]},"00081155":{"vr":"UI","Value":["1.2.3.1.1"]}}]}}]}}"#).unwrap();
+        let stored = extract_opaque_sequence(&source, "00404021")
+            .unwrap_or_else(|error| panic!("sequence rejected: {}", error.status))
+            .unwrap();
+        let parsed_input = parse_json(stored.as_bytes()).unwrap();
+        assert_eq!(
+            parsed_input.obj_get("Value"),
+            source.obj_get("00404021").unwrap().obj_get("Value")
+        );
+        let first = parse_json(br#"{"00741216":{"vr":"SQ","Value":[{"00404033":{"vr":"SQ","Value":[{"0040E020":{"vr":"CS","Value":["DICOM"]},"0020000D":{"vr":"UI","Value":["1.2.3"]},"0020000E":{"vr":"UI","Value":["1.2.3.1"]},"00081199":{"vr":"SQ","Value":[{"00081150":{"vr":"UI","Value":["1.2.3.4"]},"00081155":{"vr":"UI","Value":["1.2.3.1.1"]}}]}}]}}]}}"#).unwrap();
+        let initial = merge_performed_sequence(None, &first)
+            .unwrap_or_else(|error| panic!("report rejected: {}", error.status))
+            .unwrap();
+        let later = parse_json(br#"{"00741216":{"vr":"SQ","Value":[{"00404051":{"vr":"DT","Value":["20261109120000+0000"]}}]}}"#).unwrap();
+        let merged = merge_performed_sequence(Some(&initial), &later)
+            .unwrap_or_else(|error| panic!("report rejected: {}", error.status))
+            .unwrap();
+        let parsed = parse_json(merged.as_bytes()).unwrap();
+        let item = parsed.obj_get("Value").unwrap().first_of_array().unwrap();
+        assert!(item.obj_get("00404051").is_some());
+        let references = extract_output_information(item.obj_get("00404033").unwrap())
+            .unwrap_or_else(|error| panic!("outputs rejected: {}", error.status));
+        assert_eq!(references.len(), 1);
+        assert_eq!(references[0].sop_instance_uid, "1.2.3.1.1");
+        assert_eq!(references[0].series_instance_uid, "1.2.3.1");
+    }
+
     use crate::handlers::ups::event_bus::FilterRouting;
     use std::sync::{Arc, Mutex};
 

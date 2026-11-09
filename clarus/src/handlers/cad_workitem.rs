@@ -311,6 +311,8 @@ pub fn build_record_for_entry(
         // Filled by the caller, which is the only side with a clock.
         sps_start_datetime: None,
         input_study_uid: Some(study_instance_uid.to_string()),
+        input_information: None,
+        performed_procedure_information: None,
         reason_for_cancellation: None,
         cancellation_datetime: None,
         scheduled_workitem_code: Some(clarus_core::ups::WorkItemCode {

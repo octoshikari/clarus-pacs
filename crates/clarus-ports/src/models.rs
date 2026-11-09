@@ -130,6 +130,10 @@ pub struct WorkItem {
     /// The Study Instance UID of the input study (the first item's
     /// (0020,000D) inside (0040,4021) Input Information Sequence).
     pub input_study_uid: Option<String>,
+    /// Complete DICOM Input Information Sequence, including Series/SOP selectors.
+    pub input_information: Option<String>,
+    /// Complete performer report; preserves nested reference macros.
+    pub performed_procedure_information: Option<String>,
     /// (0074,1238) Reason For Cancellation.
     pub reason_for_cancellation: Option<String>,
     /// (0040,4052) Procedure Step Cancellation DateTime.

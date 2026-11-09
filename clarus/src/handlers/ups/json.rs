@@ -57,7 +57,7 @@ pub const STATION_CODE_MEANING: &str = "AI station";
 /// (0040,4052) ProcedureStepCancellationDateTime DT, (0040,A370)
 /// ReferencedRequestSequence SQ, (0074,1000) ProcedureStepState CS (always),
 /// (0074,1200) ScheduledProcedureStepPriority CS, (0074,1204)
-/// ProcedureStepLabel SH, (0074,1216) UnifiedProcedureStepPerformedProcedure
+/// ProcedureStepLabel LO, (0074,1216) UnifiedProcedureStepPerformedProcedure
 /// Sequence SQ - one item carrying (0040,4019) PerformedWorkitemCode
 /// Sequence, (0040,4028) PerformedStationNameCode Sequence, (0040,4033)
 /// OutputInformationSequence, (0040,4050)/(0040,4051) the performed start and
@@ -169,7 +169,16 @@ pub fn write_workitem_json(out: &mut Vec<u8>, wi: &WorkItem) {
     emit_workitem_code(out, wi.scheduled_workitem_code.as_ref(), &mut wrote);
     // (0040,4021) then (0040,4041)/(0040,4052): ascending tag order within the
     // (0040,40xx) block, which is where the input study and the state sit.
-    emit_input_information(out, wi.input_study_uid.as_deref(), &mut wrote);
+    if let Some(stored) = wi.input_information.as_deref() {
+        if wrote {
+            out.push(b',');
+        }
+        wrote = true;
+        out.extend_from_slice(b"\"00404021\":");
+        out.extend_from_slice(stored.as_bytes());
+    } else {
+        emit_input_information(out, wi.input_study_uid.as_deref(), &mut wrote);
+    }
     emit_str!("00404041", "CS", wi.input_readiness.as_deref());
     emit_str!("00404052", "DT", wi.cancellation_datetime.as_deref());
     emit_referenced_request(
@@ -182,7 +191,7 @@ pub fn write_workitem_json(out: &mut Vec<u8>, wi: &WorkItem) {
     );
     emit_str!("00741000", "CS", Some(wi.workflow_state.as_str()));
     emit_str!("00741200", "CS", wi.sps_priority.as_deref());
-    emit_str!("00741204", "SH", wi.step_label.as_deref());
+    emit_str!("00741204", "LO", wi.step_label.as_deref());
     // (0074,1210) sorts after (0074,1204) and before (0074,1216) in ascending
     // tag order, which is the position the file's own convention puts it in.
     // It is stored ALREADY SERIALIZED, so it is appended verbatim.
@@ -202,17 +211,26 @@ pub fn write_workitem_json(out: &mut Vec<u8>, wi: &WorkItem) {
         out.extend_from_slice(b"\"00741210\":");
         out.extend_from_slice(stored.as_bytes());
     }
-    emit_performed_procedure_sequence(
-        out,
-        PerformedReport {
-            start_datetime: wi.performed_start_datetime.as_deref(),
-            end_datetime: wi.performed_end_datetime.as_deref(),
-            station_name_code: wi.performed_station_name_code.as_ref(),
-            workitem_code: wi.performed_workitem_code.as_ref(),
-            output_information: wi.output_information.as_deref(),
-        },
-        &mut wrote,
-    );
+    if let Some(stored) = wi.performed_procedure_information.as_deref() {
+        if wrote {
+            out.push(b',');
+        }
+        wrote = true;
+        out.extend_from_slice(b"\"00741216\":");
+        out.extend_from_slice(stored.as_bytes());
+    } else {
+        emit_performed_procedure_sequence(
+            out,
+            PerformedReport {
+                start_datetime: wi.performed_start_datetime.as_deref(),
+                end_datetime: wi.performed_end_datetime.as_deref(),
+                station_name_code: wi.performed_station_name_code.as_ref(),
+                workitem_code: wi.performed_workitem_code.as_ref(),
+                output_information: wi.output_information.as_deref(),
+            },
+            &mut wrote,
+        );
+    }
     emit_str!("00741238", "LT", wi.reason_for_cancellation.as_deref());
     // The `wrote` flag is fully consumed by the emit pattern above; a final
     // read keeps the last assignment live.
@@ -595,6 +613,35 @@ pub fn extract_pn(obj: &JsonVal, tag: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn lossless_sequences_and_standard_label_vr_survive_rendering() {
+        let input = r#"{"Value":[{"0020000D":{"vr":"UI","Value":["1.2.3"]},"0020000E":{"vr":"UI","Value":["1.2.3.1"]},"00081199":{"vr":"SQ","Value":[{"00081155":{"vr":"UI","Value":["1.2.3.1.1"]}}]}}],"vr":"SQ"}"#;
+        let report = r#"{"Value":[{"00404033":{"vr":"SQ","Value":[{"0020000D":{"vr":"UI","Value":["1.2.3"]},"0020000E":{"vr":"UI","Value":["1.2.3.1"]},"00081199":{"vr":"SQ","Value":[{"00081155":{"vr":"UI","Value":["1.2.3.1.1"]}}]}}]}}],"vr":"SQ"}"#;
+        let mut wi = sample_workitem();
+        wi.step_label = Some("Reference task".into());
+        wi.input_information = Some(input.into());
+        wi.performed_procedure_information = Some(report.into());
+        let mut out = Vec::new();
+        write_workitem_json(&mut out, &wi);
+        let parsed = crate::handlers::json_common::parse_json(&out).unwrap();
+        assert_eq!(
+            parsed.obj_get("00404021"),
+            crate::handlers::json_common::parse_json(input.as_bytes()).as_ref()
+        );
+        assert_eq!(
+            parsed.obj_get("00741216"),
+            crate::handlers::json_common::parse_json(report.as_bytes()).as_ref()
+        );
+        assert_eq!(
+            parsed
+                .obj_get("00741204")
+                .unwrap()
+                .obj_get("vr")
+                .and_then(JsonVal::as_str),
+            Some("LO")
+        );
+    }
+
     fn sample_workitem() -> WorkItem {
         WorkItem {
             id: Some(1),
@@ -619,6 +666,8 @@ mod tests {
             input_readiness: None,
             sps_start_datetime: None,
             input_study_uid: None,
+            input_information: None,
+            performed_procedure_information: None,
             reason_for_cancellation: None,
             cancellation_datetime: None,
             patient_id_issuer: None,

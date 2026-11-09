@@ -1410,12 +1410,9 @@ fn ups_create_prefers_the_referenced_request_over_the_bare_tags() {
         Some(STUDY_A),
         "the sequence study wins over the Input Information Sequence"
     );
-    // The Input Information Sequence names the SAME study: on the Create path
-    // the Referenced Request Sequence study is the input study (Task 2), so
-    // both carriages render one fact. The bare Input Information Sequence value
-    // from the body is therefore not a second opinion - it is the same study,
-    // reached through the winning carriage.
-    assert_eq!(wi_seq_tag(&j, "00404021", "0020000D"), Some(STUDY_A));
+    // Input Information is an independent, exact input manifest. A referenced
+    // request must not replace its study or discard its series/SOP references.
+    assert_eq!(wi_seq_tag(&j, "00404021", "0020000D"), Some(STUDY_BARE));
     assert!(
         j.obj_get("00080050").is_none() && j.obj_get("0020000D").is_none(),
         "no bare top-level duplicates: {j:?}"

@@ -72,6 +72,8 @@ const K_PERFORMED_END_DATETIME: u64 = 30;
 // not know, so a new key must be written LAST and must never renumber.
 const K_SCHEDULED_PROCESSING_PARAMETERS: u64 = 31;
 const K_REASON_FOR_REQUESTED_PROCEDURE: u64 = 32;
+const K_INPUT_INFORMATION: u64 = 33;
+const K_PERFORMED_PROCEDURE_INFORMATION: u64 = 34;
 
 /// A single UPS workitem, as persisted in `workitems/{uid}.cbor`.
 ///
@@ -139,6 +141,10 @@ pub struct WorkItemRecord {
     /// `workitem_uid`, which is the identity of the workitem itself - the two
     /// were conflated before 1709 and the study UID was unreachable.
     pub input_study_uid: Option<String>,
+    /// Complete DICOM Input Information Sequence, including Series/SOP selectors.
+    pub input_information: Option<String>,
+    /// Complete performer report; preserves nested reference macros.
+    pub performed_procedure_information: Option<String>,
     /// (0074,1238) Reason For Cancellation, as carried by the Change State
     /// request that canceled the workitem (PS3.4 Table CC.2.5-3).
     pub reason_for_cancellation: Option<String>,
@@ -308,6 +314,8 @@ impl WorkItemRecord {
             self.input_readiness.is_some(),
             self.sps_start_datetime.is_some(),
             self.input_study_uid.is_some(),
+            self.input_information.is_some(),
+            self.performed_procedure_information.is_some(),
             self.reason_for_cancellation.is_some(),
             self.cancellation_datetime.is_some(),
             self.patient_id_issuer.is_some(),
@@ -470,7 +478,7 @@ impl WorkItemRecord {
             K_PERFORMED_END_DATETIME,
             self.performed_end_datetime.as_deref(),
         )?;
-        // Keys 31 and 32 close the set. They are written here rather than
+        // New optional sequence keys are appended after the existing key set. They are written here rather than
         // beside their conceptual neighbours for the same reason as the rest:
         // the map must ascend.
         write_opt_str(
@@ -482,6 +490,16 @@ impl WorkItemRecord {
             writer,
             K_REASON_FOR_REQUESTED_PROCEDURE,
             self.reason_for_requested_procedure.as_deref(),
+        )?;
+        write_opt_str(
+            writer,
+            K_INPUT_INFORMATION,
+            self.input_information.as_deref(),
+        )?;
+        write_opt_str(
+            writer,
+            K_PERFORMED_PROCEDURE_INFORMATION,
+            self.performed_procedure_information.as_deref(),
         )?;
 
         Ok(())
@@ -622,6 +640,13 @@ impl WorkItemRecord {
                 K_REASON_FOR_REQUESTED_PROCEDURE => {
                     rec.reason_for_requested_procedure =
                         Some(read_text(&mut reader, "reason_for_requested_procedure")?)
+                }
+                K_INPUT_INFORMATION => {
+                    rec.input_information = Some(read_text(&mut reader, "input_information")?)
+                }
+                K_PERFORMED_PROCEDURE_INFORMATION => {
+                    rec.performed_procedure_information =
+                        Some(read_text(&mut reader, "performed_procedure_information")?)
                 }
                 K_OUTPUT_INFORMATION => {
                     let joined = read_text(&mut reader, "output_information")?;
@@ -779,6 +804,15 @@ mod tests {
             transaction_uid: Some("tuid-abc".to_string()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn roundtrip_preserves_exact_input_and_performed_sequences() {
+        let mut record = sample();
+        record.input_information = Some(r#"{"vr":"SQ","Value":[{"0020000E":{"vr":"UI","Value":["1.2.3.1"]},"00081199":{"vr":"SQ","Value":[{"00081155":{"vr":"UI","Value":["1.2.3.1.1"]}}]}}]}"#.into());
+        record.performed_procedure_information = record.input_information.clone();
+        let encoded = record.encode().unwrap();
+        assert_eq!(WorkItemRecord::decode(&encoded).unwrap(), record);
     }
 
     #[test]
